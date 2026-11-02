@@ -1,5 +1,6 @@
 import { getSpotifyAccessToken, refreshSpotifyAccessToken } from "./spotify-auth";
-import { invalidateSpotifyCache, requestSpotify } from "./spotify-request-manager";
+import { getSpotifyRequestDiagnostics, invalidateSpotifyCache, requestSpotify } from "./spotify-request-manager";
+import { getSpotifyMockConfig, mockSpotifyRequest } from "./spotify-mock";
 
 export type SpotifyImage = { url: string; height?: number; width?: number };
 export type SpotifyArtist = { id: string; name: string; genres?: string[]; images?: SpotifyImage[]; external_urls?: { spotify?: string } };
@@ -34,8 +35,17 @@ export async function spotifyApiRequest<T>(clientId: string, endpoint: string, i
   const url = endpoint.startsWith("http") ? endpoint : `https://api.spotify.com/v1${endpoint}`;
   const method = init?.method ?? "GET";
   const key = `${method}:${url}:${typeof init?.body === "string" ? init.body : ""}`;
-  const cacheTtlMs = method === "GET" ? endpoint.includes("/search?") ? 30_000 : endpoint.includes("/me") ? 60_000 : 300_000 : undefined;
+  const cacheTtlMs = method === "GET"
+    ? endpoint.includes("/search?") ? 30_000
+      : endpoint === "/me" ? 900_000
+        : endpoint.includes("/me/playlists") ? 300_000
+          : endpoint.includes("/me/library/contains") ? 300_000
+            : endpoint.includes("/me/player/recently-played") ? 600_000
+              : endpoint.includes("/artists/") || endpoint.includes("/albums/") || endpoint.includes("/tracks/") ? 86_400_000
+                : 300_000
+    : undefined;
   return requestSpotify<T>(key, async () => {
+    if (getSpotifyMockConfig().enabled) return mockSpotifyRequest(url, method, typeof init?.body === "string" ? init.body : undefined);
     let token = await getSpotifyAccessToken(clientId);
     let response = await fetch(url, { ...init, headers: { Authorization: `Bearer ${token}`, ...(init?.headers ?? {}) } });
     if (response.status === 401) {
@@ -45,8 +55,24 @@ export async function spotifyApiRequest<T>(clientId: string, endpoint: string, i
     return response;
   }, {
     cacheTtlMs,
+    feature: endpoint.startsWith("/search") ? "discover-search"
+      : endpoint.includes("/me/playlists") ? "playlists"
+        : endpoint.includes("/me/library") ? "saved-tracks"
+          : endpoint.includes("/recently-played") ? "listening-stats"
+            : endpoint === "/me" ? "profile"
+              : endpoint.startsWith("/playlists/") ? "playlist-detail"
+                : endpoint.startsWith("/artists/") ? "artist-detail"
+                  : endpoint.startsWith("/albums/") ? "album-detail"
+                    : endpoint.startsWith("/tracks/") ? "track-detail"
+                      : "spotify-api",
+    priority: endpoint === "/me" || endpoint.includes("/me/playlists") ? "essential" : "optional",
+    method,
     parse: async response => response.status === 204 ? undefined as T : await response.json() as T
   });
+}
+
+export function getSpotifyDiagnostics() {
+  return getSpotifyRequestDiagnostics();
 }
 
 function emptyPage<T>(limit = 20): SpotifyPage<T> {
@@ -63,16 +89,19 @@ export async function getDashboardData(clientId: string): Promise<DashboardData>
       return fallback;
     }
   };
-  const likedTracks = await optional(`/me/tracks?limit=${limit}`, emptyPage<SavedTrack>(limit));
   const recentTracks = await optional(`/me/player/recently-played?limit=${limit}`, emptyPage<RecentTrack>(limit));
   const topArtists = await optional(`/me/top/artists?time_range=short_term&limit=${limit}`, emptyPage<SpotifyArtist>(limit));
   const topTracks = await optional(`/me/top/tracks?time_range=short_term&limit=${limit}`, emptyPage<SpotifyTrack>(limit));
-  return { playlists: { ...playlists, items: playlists.items.map(normalizePlaylist) }, likedTracks, recentTracks, topArtists, topTracks };
+  return { playlists: { ...playlists, items: playlists.items.map(normalizePlaylist) }, likedTracks: emptyPage<SavedTrack>(limit), recentTracks, topArtists, topTracks };
 }
 
 export async function getSpotifyPlaylists(clientId: string, offset: number): Promise<SpotifyPage<SpotifyPlaylist>> {
   const page = await spotifyApiRequest<SpotifyPage<RawPlaylist>>(clientId, `/me/playlists?limit=20&offset=${Math.max(0, Math.floor(offset))}`);
   return { ...page, items: page.items.map(normalizePlaylist) };
+}
+
+export async function getSavedTracks(clientId: string): Promise<SpotifyPage<SavedTrack>> {
+  return spotifyApiRequest<SpotifyPage<SavedTrack>>(clientId, "/me/tracks?limit=20");
 }
 
 export async function getPlaylist(clientId: string, id: string): Promise<SpotifyPlaylist & { items: SpotifyPage<SpotifyPlaylistItem> }> {

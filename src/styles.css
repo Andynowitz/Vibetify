@@ -98,7 +98,7 @@ h3 { font-size: 14px; }
 .artist-row span { font-size: 13px; }
 .artist-stat-row { padding: 3px 0; border-bottom: 1px solid var(--border); }
 .artist-stat-row .artist-row { border-bottom: 0; }
-.artist-stat-row > small { display: block; margin: -7px 0 7px 44px; color: var(--muted); font-size: 10px; }
+.artist-stat-row .artist-row > small { margin-left: auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .artist-row { width: 100%; padding: 0; color: inherit; background: transparent; text-align: left; }
 .back-button, .link-button { width: max-content; display: inline-flex; align-items: center; gap: 8px; color: var(--green); background: transparent; font-size: 12px; font-weight: 700; }
 .detail-hero, .entity-hero { display: flex; align-items: center; gap: 24px; padding: 24px; background: linear-gradient(135deg, #303030, var(--surface)); border-radius: 16px; }

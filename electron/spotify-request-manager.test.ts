@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clearSpotifyRequestState, requestSpotify, SpotifyHttpError } from "./spotify-request-manager";
+import { clearSpotifyRequestState, getSpotifyRequestDiagnostics, invalidateSpotifyCache, requestSpotify, SpotifyHttpError } from "./spotify-request-manager";
 
 function response(status: number, body: unknown = {}, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), { status, headers });
@@ -44,5 +44,51 @@ describe("Spotify request manager", () => {
       status: 403,
       reason: "PREMIUM_ACCOUNT_REQUIRED"
     } satisfies Partial<SpotifyHttpError>);
+  });
+
+  it("limits concurrent requests to two and prioritizes essential queued work", async () => {
+    clearSpotifyRequestState();
+    let active = 0;
+    let maximum = 0;
+    const started: string[] = [];
+    const execute = (name: string) => new Promise<Response>(resolve => {
+      active += 1;
+      maximum = Math.max(maximum, active);
+      started.push(name);
+      setTimeout(() => { active -= 1; resolve(response(200, { name })); }, 15);
+    });
+    const first = requestSpotify("GET:first", () => execute("first"));
+    const second = requestSpotify("GET:second", () => execute("second"));
+    const optional = requestSpotify("GET:optional", () => execute("optional"));
+    const essential = requestSpotify("GET:essential", () => execute("essential"), { priority: "essential" });
+    await Promise.all([first, second, optional, essential]);
+    expect(maximum).toBe(2);
+    expect(started.slice(2)).toEqual(["essential", "optional"]);
+  });
+
+  it("reports aggregate request diagnostics without sensitive data", async () => {
+    clearSpotifyRequestState();
+    const execute = () => Promise.resolve(response(200, { ok: true }));
+    await Promise.all([
+      requestSpotify("GET:/v1/me", execute, { cacheTtlMs: 1_000, feature: "profile" }),
+      requestSpotify("GET:/v1/me", execute, { cacheTtlMs: 1_000, feature: "profile" })
+    ]);
+    const summary = getSpotifyRequestDiagnostics();
+    expect(summary.sessionRequests).toBe(1);
+    expect(summary.duplicateRequestsPrevented).toBe(1);
+    expect(summary.requestsByFeature.profile).toBe(1);
+    expect(JSON.stringify(summary)).not.toContain("token");
+  });
+
+  it("expires and invalidates cached responses", async () => {
+    clearSpotifyRequestState();
+    let calls = 0;
+    const execute = () => { calls += 1; return Promise.resolve(response(200, { calls })); };
+    await requestSpotify("GET:cache", execute, { cacheTtlMs: 5 });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    await requestSpotify("GET:cache", execute, { cacheTtlMs: 5 });
+    invalidateSpotifyCache("GET:cache");
+    await requestSpotify("GET:cache", execute, { cacheTtlMs: 5 });
+    expect(calls).toBe(3);
   });
 });

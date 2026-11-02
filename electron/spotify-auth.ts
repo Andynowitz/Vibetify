@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { createCodeChallenge, createCodeVerifier, createState, isValidLoopbackRedirect, isValidState } from "./oauth";
 import { clearSpotifyRequestState, requestSpotify, SpotifyHttpError } from "./spotify-request-manager";
+import { getSpotifyMockConfig, mockProfile } from "./spotify-mock";
 
 const TOKEN_URL = "https://accounts.spotify.com/api/token";
 const PROFILE_URL = "https://api.spotify.com/v1/me";
@@ -165,7 +166,9 @@ export async function refreshSpotifyAccessToken(clientId: string): Promise<strin
 async function fetchProfileManaged(accessToken: string): Promise<SpotifyProfile> {
   const profile = await requestSpotify<SpotifyProfile>("GET:spotify-profile", async () =>
     fetch(PROFILE_URL, { headers: { Authorization: `Bearer ${accessToken}` } }), {
-    cacheTtlMs: 300_000,
+    cacheTtlMs: 900_000,
+    feature: "profile",
+    priority: "essential",
     parse: async response => parseProfile(await response.json() as Record<string, unknown>)
   });
   if (!profile.id) throw new Error("Spotify returned a profile without a user ID.");
@@ -282,6 +285,7 @@ export async function beginSpotifyAuthorization(window: BrowserWindow, clientId:
 }
 
 export async function getAuthState(clientId?: string): Promise<AuthState> {
+  if (getSpotifyMockConfig().enabled) return { connected: true, profile: mockProfile };
   if (clientId?.trim()) activeClientId = clientId;
   let credentials = await readCredentials();
   if (!credentials) return { connected: false };

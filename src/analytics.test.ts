@@ -28,7 +28,7 @@ describe("Spotify dashboard analytics", () => {
     expect(totals.get("one")).toBe(2);
     expect(totals.get("two")).toBe(2);
     expect(formatListeningMinutes(155)).toBe("2h 35m");
-    expect(formatListeningMinutes(undefined)).toBe("Not enough listening history");
+    expect(formatListeningMinutes(undefined)).toBe("—");
   });
 
   it("ignores incomplete history instead of throwing", () => {

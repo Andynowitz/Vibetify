@@ -65,7 +65,7 @@ export function estimateArtistListeningMinutes(items: PlayedArtistTrack[]): Map<
 }
 
 export function formatListeningMinutes(minutes: number | undefined): string {
-  if (!minutes || minutes < 1) return "Not enough listening history";
+  if (!minutes || minutes < 1) return "—";
   const rounded = Math.round(minutes);
   const hours = Math.floor(rounded / 60);
   const remainder = rounded % 60;

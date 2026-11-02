@@ -1,7 +1,9 @@
 import { app, BrowserWindow, ipcMain, shell } from "electron";
 import path from "node:path";
 import { beginSpotifyAuthorization, disconnectSpotify, getAuthState } from "./spotify-auth";
-import { getAlbum, getArtist, getDashboardData, getPlaylist, getSavedStatus, getSpotifyPlaylists, getTopItems, getTrack, searchSpotify, updateSavedTracks } from "./spotify-api";
+import { getAlbum, getArtist, getDashboardData, getPlaylist, getSavedStatus, getSavedTracks, getSpotifyDiagnostics, getSpotifyPlaylists, getTopItems, getTrack, searchSpotify, updateSavedTracks } from "./spotify-api";
+import { getSpotifyMockConfig, setSpotifyMockConfig } from "./spotify-mock";
+import { clearSpotifyRequestState } from "./spotify-request-manager";
 
 const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
 
@@ -48,6 +50,20 @@ app.whenReady().then(() => {
   ipcMain.handle("spotify:get-state", (_event, clientId: unknown) =>
     getAuthState(typeof clientId === "string" ? clientId : undefined));
   ipcMain.handle("spotify:disconnect", () => disconnectSpotify());
+  if (isDevelopment) {
+    ipcMain.handle("spotify:diagnostics", () => getSpotifyDiagnostics());
+    ipcMain.handle("spotify:diagnostics-reset", () => { clearSpotifyRequestState(); return getSpotifyDiagnostics(); });
+    ipcMain.handle("spotify:mock-config", (_event, next?: unknown) => {
+      if (next === undefined) return getSpotifyMockConfig();
+      if (!next || typeof next !== "object") throw new Error("Invalid Spotify mock configuration.");
+      const input = next as { enabled?: unknown; status?: unknown; delayMs?: unknown };
+      return setSpotifyMockConfig({
+        ...(typeof input.enabled === "boolean" ? { enabled: input.enabled } : {}),
+        ...(typeof input.status === "string" ? { status: input.status as ReturnType<typeof getSpotifyMockConfig>["status"] } : {}),
+        ...(typeof input.delayMs === "number" ? { delayMs: input.delayMs } : {})
+      });
+    });
+  }
   ipcMain.handle("spotify:begin", (event, payload: unknown) => {
     if (!payload || typeof payload !== "object") throw new Error("Invalid Spotify authorization request.");
     const { clientId, redirectUri } = payload as { clientId?: unknown; redirectUri?: unknown };
@@ -65,6 +81,10 @@ app.whenReady().then(() => {
     const { clientId, offset } = payload as { clientId?: unknown; offset?: unknown };
     if (typeof clientId !== "string") throw new Error("Spotify Client ID is not configured.");
     return getSpotifyPlaylists(clientId, typeof offset === "number" ? offset : 0);
+  });
+  ipcMain.handle("spotify:library", (_event, clientId: unknown) => {
+    if (typeof clientId !== "string") throw new Error("Spotify Client ID is not configured.");
+    return getSavedTracks(clientId);
   });
   ipcMain.handle("spotify:top-items", (_event, payload: unknown) => {
     if (!payload || typeof payload !== "object") throw new Error("Invalid listening stats request.");
