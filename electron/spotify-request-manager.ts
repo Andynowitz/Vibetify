@@ -18,6 +18,7 @@ type RequestOptions<T> = {
   feature?: string;
   priority?: "essential" | "optional";
   method?: string;
+  refresh?: boolean;
 };
 
 type CacheEntry = { expiresAt: number; value: unknown };
@@ -45,6 +46,8 @@ const MAX_CONCURRENT_REQUESTS = 2;
 let activeRequests = 0;
 let cooldownUntil = 0;
 let cooldownTimer: ReturnType<typeof setTimeout> | undefined;
+let quotaError: SpotifyHttpError | undefined;
+let persistCooldown: ((until: number) => void) | undefined;
 let diagnostics: SpotifyRequestDiagnostics = emptyDiagnostics();
 const MAX_RETRIES = 2;
 const MAX_BACKOFF_MS = 30_000;
@@ -95,10 +98,12 @@ async function wait(ms: number): Promise<void> {
 function activateCooldown(ms: number, honorExactDelay = false): void {
   const until = Date.now() + (honorExactDelay ? Math.max(ms, 250) : Math.min(Math.max(ms, 250), MAX_BACKOFF_MS));
   cooldownUntil = Math.max(cooldownUntil, until);
+  persistCooldown?.(cooldownUntil);
   if (cooldownTimer) clearTimeout(cooldownTimer);
   cooldownTimer = setTimeout(() => {
     cooldownUntil = 0;
     cooldownTimer = undefined;
+    persistCooldown?.(0);
     pump();
   }, Math.max(0, cooldownUntil - Date.now()));
 }
@@ -116,7 +121,7 @@ async function parseError(response: SpotifyResponse): Promise<SpotifyHttpError> 
 
 async function run<T>(key: string, execute: () => Promise<SpotifyResponse>, options: RequestOptions<T>): Promise<T> {
   const cached = cache.get(key);
-  if (cached && cached.expiresAt > Date.now()) {
+  if (!options.refresh && cached && cached.expiresAt > Date.now()) {
     diagnostics.cacheHits += 1;
     log("cache-hit", { endpoint: endpointFromKey(key), feature: options.feature ?? "unknown" });
     return cached.value as T;
@@ -138,9 +143,22 @@ async function run<T>(key: string, execute: () => Promise<SpotifyResponse>, opti
       const error = await parseError(response);
       const delay = error.retryAfterMs ?? Math.min(1_000 * (2 ** retry), MAX_BACKOFF_MS) + Math.floor(Math.random() * 250);
       const quotaExceeded = error.reason === "QUOTA_EXCEEDED";
-      activateCooldown(delay, error.retryAfterMs !== undefined);
       log("rate-limit", { endpoint, status: 429, retry, retryAfterMs: delay, quotaExceeded });
-      if (quotaExceeded || retry++ >= MAX_RETRIES) {
+      if (quotaExceeded) {
+        quotaError = error;
+        diagnostics.failedRequests += 1;
+        throw error;
+      }
+      cooldownUntil = Math.max(cooldownUntil, Date.now() + delay);
+      persistCooldown?.(cooldownUntil);
+      if (cooldownTimer) clearTimeout(cooldownTimer);
+      cooldownTimer = setTimeout(() => {
+        cooldownUntil = 0;
+        cooldownTimer = undefined;
+        persistCooldown?.(0);
+        pump();
+      }, delay);
+      if (retry++ >= MAX_RETRIES) {
         diagnostics.failedRequests += 1;
         throw error;
       }
@@ -172,8 +190,9 @@ function pump(): void {
 }
 
 export function requestSpotify<T>(key: string, execute: () => Promise<SpotifyResponse>, options: RequestOptions<T> = {}): Promise<T> {
+  if (options.refresh) cache.delete(key);
   const cached = cache.get(key);
-  if (cached && cached.expiresAt > Date.now()) {
+  if (!options.refresh && cached && cached.expiresAt > Date.now()) {
     diagnostics.cacheHits += 1;
     return Promise.resolve(cached.value as T);
   }
@@ -182,6 +201,10 @@ export function requestSpotify<T>(key: string, execute: () => Promise<SpotifyRes
     diagnostics.duplicateRequestsPrevented += 1;
     log("deduplicated", { endpoint: endpointFromKey(key), feature: options.feature ?? "unknown" });
     return existing as Promise<T>;
+  }
+  if (quotaError) {
+    diagnostics.cooldownRejected += 1;
+    return Promise.reject(quotaError);
   }
   const promise = new Promise<T>((resolve, reject) => {
     queue.push({
@@ -222,6 +245,22 @@ export function invalidateSpotifyCache(prefix?: string): void {
   for (const key of cache.keys()) if (!prefix || key.startsWith(prefix)) cache.delete(key);
 }
 
+export function setSpotifyCooldownPersistence(save: (until: number) => void): void {
+  persistCooldown = save;
+}
+
+export function restoreSpotifyCooldown(until: number): void {
+  if (!Number.isFinite(until) || until <= Date.now()) return;
+  cooldownUntil = Math.max(cooldownUntil, until);
+  if (cooldownTimer) clearTimeout(cooldownTimer);
+  cooldownTimer = setTimeout(() => {
+    cooldownUntil = 0;
+    cooldownTimer = undefined;
+    persistCooldown?.(0);
+    pump();
+  }, cooldownUntil - Date.now());
+}
+
 export function clearSpotifyRequestState(): void {
   cache.clear();
   queue.length = 0;
@@ -229,6 +268,8 @@ export function clearSpotifyRequestState(): void {
   if (cooldownTimer) clearTimeout(cooldownTimer);
   cooldownTimer = undefined;
   cooldownUntil = 0;
+  quotaError = undefined;
+  persistCooldown?.(0);
   activeRequests = 0;
   diagnostics = emptyDiagnostics();
 }

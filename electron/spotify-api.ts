@@ -11,7 +11,24 @@ export type SpotifyPlaylistItem = { added_at?: string; track?: SpotifyTrack };
 export type SpotifyPage<T> = { items: T[]; next: string | null; total: number; limit: number; offset: number };
 export type SavedTrack = { added_at: string; track: SpotifyTrack };
 export type RecentTrack = { played_at: string; track: SpotifyTrack; context?: { uri?: string; type?: string } };
+export type RecentTracksResult = { items: RecentTrack[]; requested: number; available: number };
+export type MostRecentArtistResult = { artistNames: string[]; trackName?: string; playedAt?: string };
+export type FavoriteGenreResult = { genres: Array<{ name: string; score: number }>; artistsConsidered: number; artistsWithGenres: number; timeRange: string };
+export type MostRecentPlaylistResult = { playlistName?: string; playlistId?: string; playedAt?: string; trackName?: string; available: boolean };
+export function playlistIdFromPlaybackContext(context: RecentTrack["context"] | null): string | undefined {
+  const uri = context?.uri;
+  return typeof uri === "string" && context?.type === "playlist" ? uri.match(/^spotify:playlist:([^:]+)$/)?.[1] : undefined;
+}
 export type DashboardData = { playlists: SpotifyPage<SpotifyPlaylist>; likedTracks: SpotifyPage<SavedTrack>; recentTracks: SpotifyPage<RecentTrack>; topArtists: SpotifyPage<SpotifyArtist>; topTracks: SpotifyPage<SpotifyTrack> };
+export type PlaylistListeningEstimate = {
+  available: boolean;
+  basis: "recently-played-sample";
+  historyRecordsConsidered: number;
+  playlistsConsidered: number;
+  windowDescription: string;
+  rankings: Array<{ playlistId: string; playlistName: string; matchedPlays: number; matchedHistoryRecords: number }>;
+  limitation?: string;
+};
 
 type RawPlaylist = Omit<SpotifyPlaylist, "tracks"> & { tracks?: { total?: number }; items?: { total?: number } };
 type RawPlaylistPage = { items?: Array<{ added_at?: string; item?: SpotifyTrack; track?: SpotifyTrack }>; next?: string | null; total?: number; limit?: number; offset?: number };
@@ -31,7 +48,7 @@ export function normalizePlaylistItems(raw: RawPlaylistPage): SpotifyPage<Spotif
   };
 }
 
-export async function spotifyApiRequest<T>(clientId: string, endpoint: string, init?: RequestInit): Promise<T> {
+export async function spotifyApiRequest<T>(clientId: string, endpoint: string, init?: RequestInit, options: { refresh?: boolean } = {}): Promise<T> {
   const url = endpoint.startsWith("http") ? endpoint : `https://api.spotify.com/v1${endpoint}`;
   const method = init?.method ?? "GET";
   const key = `${method}:${url}:${typeof init?.body === "string" ? init.body : ""}`;
@@ -67,6 +84,7 @@ export async function spotifyApiRequest<T>(clientId: string, endpoint: string, i
                       : "spotify-api",
     priority: endpoint === "/me" || endpoint.includes("/me/playlists") ? "essential" : "optional",
     method,
+    refresh: options.refresh,
     parse: async response => response.status === 204 ? undefined as T : await response.json() as T
   });
 }
@@ -79,11 +97,11 @@ function emptyPage<T>(limit = 20): SpotifyPage<T> {
   return { items: [], next: null, total: 0, limit, offset: 0 };
 }
 
-export async function getDashboardData(clientId: string): Promise<DashboardData> {
+export async function getDashboardData(clientId: string, refresh = false): Promise<DashboardData> {
   const limit = 20;
-  const playlists = await spotifyApiRequest<SpotifyPage<SpotifyPlaylist>>(clientId, `/me/playlists?limit=${limit}`);
+  const playlists = await spotifyApiRequest<SpotifyPage<SpotifyPlaylist>>(clientId, `/me/playlists?limit=${limit}`, undefined, { refresh });
   const optional = async <T>(endpoint: string, fallback: T): Promise<T> => {
-    try { return await spotifyApiRequest<T>(clientId, endpoint); }
+    try { return await spotifyApiRequest<T>(clientId, endpoint, undefined, { refresh }); }
     catch (error) {
       console.warn(JSON.stringify({ component: "spotify-api", event: "optional-failure", endpoint, error: error instanceof Error ? error.message : "unknown" }));
       return fallback;
@@ -95,9 +113,132 @@ export async function getDashboardData(clientId: string): Promise<DashboardData>
   return { playlists: { ...playlists, items: playlists.items.map(normalizePlaylist) }, likedTracks: emptyPage<SavedTrack>(limit), recentTracks, topArtists, topTracks };
 }
 
-export async function getSpotifyPlaylists(clientId: string, offset: number): Promise<SpotifyPage<SpotifyPlaylist>> {
-  const page = await spotifyApiRequest<SpotifyPage<RawPlaylist>>(clientId, `/me/playlists?limit=20&offset=${Math.max(0, Math.floor(offset))}`);
+export async function getSpotifyPlaylists(clientId: string, offset: number, refresh = false): Promise<SpotifyPage<SpotifyPlaylist>> {
+  const page = await spotifyApiRequest<SpotifyPage<RawPlaylist>>(clientId, `/me/playlists?limit=20&offset=${Math.max(0, Math.floor(offset))}`, undefined, { refresh });
   return { ...page, items: page.items.map(normalizePlaylist) };
+}
+
+export async function getRecentlyPlayed(clientId: string, limit = 50, refresh = false): Promise<SpotifyPage<RecentTrack>> {
+  const requested = Math.max(1, Math.min(50, Math.floor(limit)));
+  return spotifyApiRequest<SpotifyPage<RecentTrack>>(clientId, `/me/player/recently-played?limit=${requested}`, undefined, { refresh });
+}
+
+export async function getRecentlyPlayedTracks(clientId: string, limit: number): Promise<RecentTracksResult> {
+  const requested = Math.max(1, Math.min(50, Math.floor(limit)));
+  const page = await getRecentlyPlayed(clientId, 50, false);
+  const items = selectRecentTracks(page.items, requested);
+  return { items, requested, available: page.items.length };
+}
+
+export function selectRecentTracks(items: RecentTrack[], limit: number): RecentTrack[] {
+  const requested = Math.max(1, Math.min(50, Math.floor(limit)));
+  return items
+    .filter(item => item && item.track)
+    .map((item, index) => ({ item, index, timestamp: Date.parse(item.played_at) }))
+    .sort((left, right) => {
+      const leftValid = Number.isFinite(left.timestamp);
+      const rightValid = Number.isFinite(right.timestamp);
+      if (leftValid && rightValid) return right.timestamp - left.timestamp || left.index - right.index;
+      if (leftValid) return -1;
+      if (rightValid) return 1;
+      return left.index - right.index;
+    })
+    .slice(0, requested)
+    .map(entry => entry.item);
+}
+
+export async function getMostRecentArtist(clientId: string): Promise<MostRecentArtistResult> {
+  const recent = await getRecentlyPlayedTracks(clientId, 1);
+  const newest = recent.items[0];
+  return newest
+    ? { artistNames: newest.track.artists.map(artist => artist.name), trackName: newest.track.name, playedAt: newest.played_at }
+    : { artistNames: [] };
+}
+
+export async function getFavoriteGenre(clientId: string): Promise<FavoriteGenreResult> {
+  const artists = (await getTopArtists(clientId, "long_term")).items;
+  const scores = new Map<string, number>();
+  let artistsWithGenres = 0;
+  artists.forEach((artist, index) => {
+    const genres = artist.genres ?? [];
+    if (genres.length) artistsWithGenres += 1;
+    const weight = artists.length - index;
+    genres.forEach(genre => scores.set(genre, (scores.get(genre) ?? 0) + weight));
+  });
+  return {
+    genres: [...scores.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0])).map(([name, score]) => ({ name, score })),
+    artistsConsidered: artists.length,
+    artistsWithGenres,
+    timeRange: "long_term"
+  };
+}
+
+export async function getTopArtists(clientId: string, timeRange: string, refresh = false): Promise<SpotifyPage<SpotifyArtist>> {
+  const range = new Set(["short_term", "medium_term", "long_term"]).has(timeRange) ? timeRange : "short_term";
+  return spotifyApiRequest<SpotifyPage<SpotifyArtist>>(clientId, `/me/top/artists?time_range=${range}&limit=20`, undefined, { refresh });
+}
+
+export async function getTopTracks(clientId: string, timeRange: string, refresh = false): Promise<SpotifyPage<SpotifyTrack>> {
+  const range = new Set(["short_term", "medium_term", "long_term"]).has(timeRange) ? timeRange : "short_term";
+  return spotifyApiRequest<SpotifyPage<SpotifyTrack>>(clientId, `/me/top/tracks?time_range=${range}&limit=20`, undefined, { refresh });
+}
+
+export async function getMostRecentPlaylist(clientId: string): Promise<MostRecentPlaylistResult> {
+  const recent = await getRecentlyPlayedTracks(clientId, 1);
+  const entry = recent.items[0];
+  const playlistId = playlistIdFromPlaybackContext(entry?.context);
+  if (!entry || !playlistId) return { available: false, playedAt: entry?.played_at, trackName: entry?.track.name };
+  const playlist = await spotifyApiRequest<{ id?: string; name?: string }>(clientId, `/playlists/${encodeURIComponent(playlistId)}?fields=id,name`);
+  return { available: typeof playlist.name === "string", playlistId: playlist.id ?? playlistId, playlistName: playlist.name, playedAt: entry.played_at, trackName: entry.track.name };
+}
+
+export async function getMostPlayedPlaylistsEstimate(clientId: string): Promise<PlaylistListeningEstimate> {
+  const history = await spotifyApiRequest<SpotifyPage<RecentTrack>>(clientId, "/me/player/recently-played?limit=50");
+  const playlists = await getSpotifyPlaylists(clientId, 0);
+  const candidates = playlists.items.slice(0, 10);
+  const timestamps = history.items.map(item => Date.parse(item.played_at)).filter(value => Number.isFinite(value));
+  const windowDescription = timestamps.length
+    ? `${new Date(Math.min(...timestamps)).toISOString()} to ${new Date(Math.max(...timestamps)).toISOString()}`
+    : "the available Spotify recently-played history";
+  if (!history.items.length || !candidates.length) {
+    return {
+      available: false,
+      basis: "recently-played-sample",
+      historyRecordsConsidered: history.items.length,
+      playlistsConsidered: candidates.length,
+      windowDescription,
+      rankings: [],
+      limitation: "Spotify did not provide enough recent-play history or playlists to estimate playlist activity."
+    };
+  }
+  const recentByTrack = new Map<string, number>();
+  history.items.forEach(item => recentByTrack.set(item.track.id, (recentByTrack.get(item.track.id) ?? 0) + 1));
+  const rankings: PlaylistListeningEstimate["rankings"] = [];
+  for (const playlist of candidates) {
+    const details = await getPlaylist(clientId, playlist.id);
+    let matchedPlays = 0;
+    let matchedHistoryRecords = 0;
+    const seenTracks = new Set<string>();
+    for (const item of details.items.items) {
+      const trackId = item.track?.id;
+      if (!trackId || seenTracks.has(trackId)) continue;
+      seenTracks.add(trackId);
+      const plays = recentByTrack.get(trackId) ?? 0;
+      matchedPlays += plays;
+      if (plays > 0) matchedHistoryRecords += plays;
+    }
+    if (matchedPlays > 0) rankings.push({ playlistId: playlist.id, playlistName: playlist.name, matchedPlays, matchedHistoryRecords });
+  }
+  rankings.sort((left, right) => right.matchedPlays - left.matchedPlays || left.playlistName.localeCompare(right.playlistName));
+  return {
+    available: rankings.length > 0,
+    basis: "recently-played-sample",
+    historyRecordsConsidered: history.items.length,
+    playlistsConsidered: candidates.length,
+    windowDescription,
+    rankings,
+    limitation: rankings.length ? "This is an estimate from the sampled recent-play history, not an official Spotify playlist play count or lifetime ranking. A track appearing in multiple playlists contributes to each matching playlist." : "None of the sampled recently played tracks matched the sampled playlist contents."
+  };
 }
 
 export async function getSavedTracks(clientId: string): Promise<SpotifyPage<SavedTrack>> {
@@ -173,12 +314,12 @@ export async function searchSpotify(clientId: string, query: string, type: strin
   return spotifyApiRequest(clientId, `/search?q=${encodeURIComponent(query.trim())}&type=${searchTypes}&limit=10&offset=${Math.max(0, Math.floor(offset))}`);
 }
 
-export async function getTopItems(clientId: string, timeRange: string): Promise<{ artists: SpotifyPage<SpotifyArtist>; tracks: SpotifyPage<SpotifyTrack>; recentTracks: SpotifyPage<RecentTrack> }> {
+export async function getTopItems(clientId: string, timeRange: string, refresh = false): Promise<{ artists: SpotifyPage<SpotifyArtist>; tracks: SpotifyPage<SpotifyTrack>; recentTracks: SpotifyPage<RecentTrack> }> {
   const range = new Set(["short_term", "medium_term", "long_term"]).has(timeRange) ? timeRange : "short_term";
   const [artists, tracks, recentTracks] = await Promise.all([
-    spotifyApiRequest<SpotifyPage<SpotifyArtist>>(clientId, `/me/top/artists?time_range=${range}&limit=20`),
-    spotifyApiRequest<SpotifyPage<SpotifyTrack>>(clientId, `/me/top/tracks?time_range=${range}&limit=20`),
-    spotifyApiRequest<SpotifyPage<RecentTrack>>(clientId, "/me/player/recently-played?limit=50")
+    spotifyApiRequest<SpotifyPage<SpotifyArtist>>(clientId, `/me/top/artists?time_range=${range}&limit=20`, undefined, { refresh }),
+    spotifyApiRequest<SpotifyPage<SpotifyTrack>>(clientId, `/me/top/tracks?time_range=${range}&limit=20`, undefined, { refresh }),
+    getRecentlyPlayed(clientId, 50, refresh)
   ]);
   return { artists, tracks, recentTracks };
 }

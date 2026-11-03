@@ -46,7 +46,7 @@ const playlists: SpotifyPlaylist[] = Array.from({ length: 8 }, (_, index) => ({
   tracks: { total: 5 + (index % 4) }
 }));
 const likedIds = new Set(["track-1", "track-3", "track-5", "track-8", "track-13", "track-18"]);
-const recent = tracks.slice(0, 10).map((track, index) => ({ played_at: new Date(Date.now() - index * 3600000).toISOString(), track, context: { uri: `spotify:playlist:playlist-${(index % 8) + 1}` } }));
+const recent = tracks.slice(0, 10).map((track, index) => ({ played_at: new Date(Date.now() - index * 3600000).toISOString(), track, context: { type: "playlist", uri: `spotify:playlist:playlist-${(index % 8) + 1}` } }));
 
 export function getSpotifyMockConfig(): SpotifyMockConfig { return { ...config }; }
 export function setSpotifyMockConfig(next: Partial<SpotifyMockConfig>): SpotifyMockConfig {

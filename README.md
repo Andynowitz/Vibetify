@@ -2,6 +2,47 @@
 
 Vibetify is a Windows desktop music workspace built with Electron, React, TypeScript, and Vite. It combines a Spotify-backed music-library interface with an AI assistant and secure token handling.
 
+## Quick Start (Git Bash)
+
+Open three Git Bash terminals from your project directory.
+
+**1. Start Ollama**
+
+```bash
+ollama serve
+```
+
+If Ollama is already running in the background, skip this step.
+
+**2. Start the AI backend**
+
+```bash
+cd ~/Desktop/Vibetify
+source ~/.config/vibetify/backend.env
+npm run backend:dev
+```
+
+**3. Start Electron and Vite**
+
+```bash
+cd ~/Desktop/Vibetify
+source ~/.config/vibetify/electron.env
+npm run dev
+```
+
+**4. Start Backend and Electron and Vite**
+```bash
+
+cd ~/Desktop/Vibetify
+source ~/.config/vibetify/backend.env
+source ~/.config/vibetify/electron.env
+npm run dev:full
+```
+
+Keep all three terminals open while using Vibetify.
+
+The backend connects to Ollama automatically. You do not need to run `ollama run qwen3-coder:30b` separately.
+
 ## Architecture
 
 - `electron/main.ts` creates the native Windows window and only exposes a validated external-link IPC action.
@@ -10,10 +51,11 @@ Vibetify is a Windows desktop music workspace built with Electron, React, TypeSc
 - `electron/spotify-api.ts` owns authenticated Spotify Web API calls; tokens never enter renderer JavaScript.
 - Vite provides development HMR; Electron loads the Vite URL in development and packaged assets in production.
 - Electron Builder creates a Windows x64 NSIS installer.
+- `backend/` contains the provider-only AI service; it is deployed separately and is never bundled into the desktop installer.
 
 ## Development
 
-```powershell
+```bash
 npm install
 npm run dev
 ```
@@ -22,7 +64,7 @@ The `dev` script starts Vite, waits for it to be ready, and opens Vibetify in it
 
 ## Build and package
 
-```powershell
+```bash
 npm run typecheck
 npm test
 npm run build
@@ -30,6 +72,47 @@ npm run package:win
 ```
 
 The installer is written to `release/`.
+
+## Real AI backend
+
+The default provider is the deterministic Mock AI. Real AI uses this flow:
+
+```text
+Electron main process -> authenticated backend -> Ollama or OpenAI
+```
+
+The OpenAI key is only read by the backend. Local Ollama is contacted only by the backend and remains bound to `127.0.0.1`; neither provider credential is accepted by preload or renderer code.
+
+### Local backend
+
+Copy `.env.backend.example` to a backend-only environment file and set real values:
+
+- `AI_BACKEND_PROVIDER`: `ollama` or `openai`; defaults to `openai`.
+- `OLLAMA_BASE_URL`: local Ollama URL, default `http://127.0.0.1:11434`.
+- `OLLAMA_MODEL`: Ollama model, default `qwen3-coder:30b`.
+- `OPENAI_API_KEY`: backend-only OpenAI API key.
+- `OPENAI_MODEL`: model name, default `gpt-4.1-mini`.
+- `AI_JWT_SECRET`: long random signing key for short-lived access tokens.
+- `AI_BOOTSTRAP_TOKEN`: separate local bootstrap credential; never commit or package it.
+- `AI_DEV_USER_ID`: local development subject identifier.
+- `AI_BACKEND_PORT`: local listening port, default `8787`.
+- `AI_RATE_LIMIT`, `AI_MAX_BODY_BYTES`, `OPENAI_TIMEOUT_MS`: safety limits.
+
+For local Ollama, verify the model is installed:
+
+```bash
+ollama list
+```
+
+The Ollama server must be running before starting the backend.
+
+To use OpenAI instead, set `AI_BACKEND_PROVIDER=openai` and configure `OPENAI_API_KEY` and `OPENAI_MODEL` in the backend environment file.
+
+The Electron process checks backend/provider status and exchanges the bootstrap value for a 15-minute bearer token. The assistant shows the active provider and model, and does not silently fall back if Ollama is unavailable.
+
+For hosted deployment, replace the local bootstrap endpoint with an OIDC/device-login flow or another reviewed identity provider; do not ship a shared bootstrap value to end users. Configure TLS, a real user directory, secret storage, token revocation/rotation, and a distributed rate limiter before exposing the service publicly. The current backend and Ollama defaults bind to localhost and are suitable only for controlled local development.
+
+To return to Mock AI, set `AI_PROVIDER=mock` and restart Electron. Mock mode never contacts the backend or OpenAI.
 
 ## Spotify configuration
 
@@ -72,6 +155,8 @@ Playlists use Spotify-provided artwork and metadata. Liked songs, recently playe
 The application shows explicit disconnected, loading, empty, and error states instead of fake account statistics. Spotify Development Mode limits and account permissions can make some endpoints unavailable; those failures are surfaced in the relevant section.
 
 Spotify requests are coordinated in the Electron main process. Identical in-flight requests are deduplicated, successful GET responses use short-lived caches, saved-library checks are reused, and 429 responses honor `Retry-After` with bounded exponential backoff and a shared cooldown. A `QUOTA_EXCEEDED` response is reported as a rate-limit/quota problem rather than an expired login.
+
+The dashboard, recently played, top artists, and listening stats sections each provide a manual refresh button. Refresh requests bypass only the target endpoint's cached GET response, remain subject to the shared concurrency limit and cooldown, and keep the previously loaded data visible if the request fails. The renderer coordinates these resources through a shared in-memory store so the same recently-played and top-artist responses are reused across views, with a last-updated timestamp shown after the first successful load.
 
 OAuth callback completion is independent of profile enrichment: after the authorization code is exchanged, encrypted credentials are written and the loopback browser callback receives its success page immediately. `/v1/me` profile loading runs afterward. A profile 429, including `QUOTA_EXCEEDED`, keeps the session connected and shows a temporary profile-unavailable message; only an invalid refresh token or explicit disconnect clears credentials.
 

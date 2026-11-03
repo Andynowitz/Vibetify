@@ -1,4 +1,4 @@
-import { app, BrowserWindow, safeStorage, shell } from "electron";
+﻿import { app, BrowserWindow, safeStorage, shell } from "electron";
 import { createServer, type Server } from "node:http";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -176,7 +176,13 @@ async function fetchProfileManaged(accessToken: string): Promise<SpotifyProfile>
 }
 
 async function enrichStoredProfile(accessToken: string): Promise<SpotifyProfile> {
-  const profile = await fetchProfileManaged(accessToken);
+  const profile = await requestSpotify<SpotifyProfile>("GET:spotify-profile", async () =>
+    fetch(PROFILE_URL, { headers: { Authorization: `Bearer ${accessToken}` } }), {
+    cacheTtlMs: 900_000,
+    feature: "profile",
+    priority: "essential",
+    parse: async response => parseProfile(await response.json() as Record<string, unknown>)
+  });
   const credentials = await readCredentials();
   if (credentials && credentials.accessToken === accessToken) {
     credentials.profile = profile;
@@ -185,13 +191,6 @@ async function enrichStoredProfile(accessToken: string): Promise<SpotifyProfile>
   return profile;
 }
 
-async function fetchProfile(accessToken: string): Promise<SpotifyProfile> {
-  const response = await fetch(PROFILE_URL, { headers: { Authorization: `Bearer ${accessToken}` } });
-  if (!response.ok) throw new Error(`Spotify profile request failed (${response.status}).`);
-  const profile = parseProfile(await response.json() as Record<string, unknown>);
-  if (!profile.id) throw new Error("Spotify returned a profile without a user ID.");
-  return profile;
-}
 
 function closeCallbackServer(): void {
   callbackServer?.close();

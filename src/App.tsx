@@ -1,11 +1,16 @@
 import { Component, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import rehypeSanitize from "rehype-sanitize";
+import remarkGfm from "remark-gfm";
 import {
   Activity, ArrowLeft, BarChart3, Bot, ChevronRight, CircleUserRound, Compass, Disc3, ExternalLink,
-  Heart, LayoutDashboard, ListMusic, LockKeyhole, Menu, Play, Search, Settings as SettingsIcon, WandSparkles, X
+  Heart, LayoutDashboard, ListMusic, LockKeyhole, Menu, Play, RefreshCw, Search, Settings as SettingsIcon, WandSparkles, X
 } from "lucide-react";
 import { classifySearchResult, estimateArtistListeningMinutes, estimateListeningHours, filterByQuery, filterTracksByQuery, formatListeningMinutes, mostCommonGenre } from "./analytics";
 import { isSpotifyConfigured, startSpotifyAuthorization } from "./spotify";
-import type { ChatMessage, Section } from "./types";
+import { useSpotifyResource } from "./use-spotify-resource";
+import type { Section } from "./types";
+import { createOptimisticMessage, normalizeEscapedMarkdown } from "./chat";
 
 type Image = { url: string };
 type Artist = { id: string; name: string; genres?: string[]; images?: Image[]; external_urls?: { spotify?: string } };
@@ -13,12 +18,16 @@ type Track = { id: string; name: string; duration_ms: number; artists: Artist[];
 type Album = { id: string; name: string; artists: Artist[]; images?: Image[]; release_date?: string; total_tracks?: number; tracks?: Page<Track> };
 type Playlist = { id: string; name: string; description?: string | null; images?: Image[]; owner?: { display_name?: string }; external_urls?: { spotify?: string }; tracks?: { total: number } };
 type Page<T> = { items: T[]; total: number; next: string | null };
-type DashboardData = { playlists: Page<Playlist>; likedTracks: Page<{ added_at: string; track: Track }>; recentTracks: Page<{ played_at: string; track: Track; context?: { uri?: string } }>; topArtists: Page<Artist>; topTracks: Page<Track> };
+type RecentPlay = { played_at: string; track: Track; context?: { uri?: string } };
 type Route = { kind: Section | "playlist" | "track" | "album" | "artist"; id?: string };
 type Profile = SpotifyProfile;
 type MockConfig = { enabled: boolean; status: string; delayMs: number };
 type Diagnostics = { sessionRequests: number; cacheHits: number; cacheMisses: number; duplicateRequestsPrevented: number; currentConcurrentRequests: number; maximumObservedConcurrency: number; queuedRequests: number; failedRequests: number; cooldownRejected: number; requestsByEndpoint: Record<string, number> };
 const clientId = import.meta.env.VITE_SPOTIFY_CLIENT_ID ?? "";
+const fetchRecentlyPlayed = (refresh: boolean) => window.vibetify.spotify.recentlyPlayed(clientId, refresh) as Promise<Page<RecentPlay>>;
+const fetchTopArtists = (timeRange: string) => (refresh: boolean) => window.vibetify.spotify.topArtists(clientId, timeRange, refresh) as Promise<Page<Artist>>;
+const fetchTopTracks = (timeRange: string) => (refresh: boolean) => window.vibetify.spotify.topTracks(clientId, timeRange, refresh) as Promise<Page<Track>>;
+const fetchPlaylists = (refresh: boolean) => window.vibetify.spotify.playlists(clientId, 0, refresh) as Promise<Page<Playlist>>;
 const nav: Array<{ id: Section; label: string; icon: typeof LayoutDashboard }> = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard }, { id: "assistant", label: "AI Assistant", icon: WandSparkles },
   { id: "playlists", label: "My Playlists", icon: ListMusic }, { id: "discover", label: "Discover", icon: Compass },
@@ -91,10 +100,19 @@ function NavItem({ item, active, onSelect }: { item: typeof nav[number]; active:
 function Header({ eyebrow, title, subtitle, action }: { eyebrow: string; title: string; subtitle: string; action?: React.ReactNode }) { return <div className="page-header"><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p className="subtitle">{subtitle}</p></div>{action}</div>; }
 function State({ loading, error, connected, children }: { loading: boolean; error?: string; connected: boolean; children: React.ReactNode }) { if (!connected) return <div className="empty-state"><Disc3 size={28} /><h3>Connect Spotify to see your music</h3><p>Your playlists, listening history, and library will appear here after authorization.</p></div>; if (loading) return <div className="loading-state">Loading your Spotify data…</div>; if (error) return <div className="error-state">{error}</div>; return <>{children}</>; }
 function Dashboard({ profile, connected, navigate, savedIds, setSavedIds, toggleSaved }: { profile?: Profile; connected: boolean; navigate: (r: Route) => void; savedIds: Set<string>; setSavedIds: React.Dispatch<React.SetStateAction<Set<string>>>; toggleSaved: (id: string, saved: boolean) => Promise<void> }) {
-  const [data, setData] = useState<DashboardData>(); const [error, setError] = useState(""); const [loading, setLoading] = useState(connected);
-  useEffect(() => { if (!connected) return; setLoading(true); void window.vibetify.spotify.dashboard(clientId).then(value => { const result = value as DashboardData; setData(result); const ids = [...new Set([...result.topTracks.items, ...result.recentTracks.items.map(item => item.track)].map(track => track.id))]; return window.vibetify.spotify.savedStatus(clientId, ids).then(status => setSavedIds(current => { const next = new Set(current); ids.forEach((id, index) => status[index] ? next.add(id) : next.delete(id)); return next; })); }).catch(e => setError(e instanceof Error ? e.message : "Could not load Spotify data.")).finally(() => setLoading(false)); }, [connected]);
-  const genre = useMemo(() => mostCommonGenre(data?.topArtists.items.map(a => a.genres ?? []) ?? []), [data]); const hours = data ? estimateListeningHours(data.recentTracks.items) : undefined;
-  return <div className="content-stack"><Header eyebrow="YOUR LISTENING" title={`Good evening, ${profile?.displayName ?? "there"}.`} subtitle="Your real Spotify listening, in one place." /><State loading={loading} error={error} connected={connected}>{data && <><div className="stat-grid"><Stat value={hours ? `${hours.toFixed(1)}h` : "—"} label="recent listening estimate" icon={<Activity size={18} />} /><Stat value={data.topTracks.items[0]?.name ?? "—"} label="top track · short term" icon={<Play size={18} />} /><Stat value={genre ?? "Unavailable"} label="favorite genre · top artists" icon={<Disc3 size={18} />} /></div><SectionTitle title="Your playlists" action="View all" onClick={() => navigate({ kind: "playlists" })} /><div className="playlist-grid">{data.playlists.items.slice(0, 3).map(p => <PlaylistCard key={p.id} playlist={p} onOpen={() => navigate({ kind: "playlist", id: p.id })} />)}</div><div className="two-column"><div className="panel"><SectionTitle title="Recently played" action="View library" onClick={() => navigate({ kind: "library" })} /><TrackList tracks={data.recentTracks.items.map(x => x.track)} navigate={navigate} savedIds={savedIds} setSavedIds={setSavedIds} toggleSaved={toggleSaved} /></div><div className="panel"><SectionTitle title="Top artists" action="Stats" onClick={() => navigate({ kind: "stats" })} />{data.topArtists.items.slice(0, 5).map((a, i) => <ArtistRow key={a.id} artist={a} rank={i + 1} onOpen={() => navigate({ kind: "artist", id: a.id })} />)}</div></div></>}</State></div>;
+  const recent = useSpotifyResource("recent", fetchRecentlyPlayed, connected, { staleAfterMs: 5 * 60_000 });
+  const topArtists = useSpotifyResource("top-artists:short_term", fetchTopArtists("short_term"), connected, { staleAfterMs: 5 * 60_000 });
+  const topTracks = useSpotifyResource("top-tracks:short_term", fetchTopTracks("short_term"), connected, { staleAfterMs: 5 * 60_000 });
+  const playlists = useSpotifyResource("playlists", fetchPlaylists, connected, { staleAfterMs: 5 * 60_000 });
+  const resources = [recent, topArtists, topTracks, playlists];
+  const ready = recent.data && topArtists.data && topTracks.data && playlists.data;
+  const firstError = resources.find(resource => resource.error)?.error;
+  const loading = !ready && !firstError;
+  const refreshing = resources.some(resource => resource.phase === "refreshing");
+  const refreshAll = () => resources.forEach(resource => resource.refresh());
+  const genre = useMemo(() => mostCommonGenre(topArtists.data?.items.map(a => a.genres ?? []) ?? []), [topArtists.data]);
+  const hours = recent.data ? estimateListeningHours(recent.data.items) : undefined;
+  return <div className="content-stack"><Header eyebrow="YOUR LISTENING" title={`Good evening, ${profile?.displayName ?? "there"}.`} subtitle="Your real Spotify listening, in one place." action={<RefreshButton onClick={refreshAll} refreshing={loading || refreshing} label="Refresh dashboard" />} /><State loading={loading} error={ready ? undefined : firstError} connected={connected}>{ready && <>{firstError && <div className="refresh-error">{firstError}</div>}<div className="stat-grid"><Stat value={hours ? `${hours.toFixed(1)}h` : "—"} label="recent listening estimate" icon={<Activity size={18} />} /><Stat value={topTracks.data!.items[0]?.name ?? "—"} label="top track · short term" icon={<Play size={18} />} /><Stat value={genre ?? "Unavailable"} label="favorite genre · top artists" icon={<Disc3 size={18} />} /></div><SectionTitle title="Your playlists" action="View all" onClick={() => navigate({ kind: "playlists" })} onRefresh={playlists.refresh} refreshing={playlists.phase === "refreshing"} updatedAt={playlists.updatedAt} /><div className="playlist-grid">{playlists.data!.items.slice(0, 3).map(p => <PlaylistCard key={p.id} playlist={p} onOpen={() => navigate({ kind: "playlist", id: p.id })} />)}</div><div className="two-column"><div className="panel"><SectionTitle title="Recently played" action="View library" onClick={() => navigate({ kind: "library" })} onRefresh={recent.refresh} refreshing={recent.phase === "refreshing"} updatedAt={recent.updatedAt} /><TrackList tracks={recent.data!.items.slice(0, 20).map(x => x.track)} navigate={navigate} savedIds={savedIds} setSavedIds={setSavedIds} toggleSaved={toggleSaved} /></div><div className="panel"><SectionTitle title="Top artists" action="Stats" onClick={() => navigate({ kind: "stats" })} onRefresh={topArtists.refresh} refreshing={topArtists.phase === "refreshing"} updatedAt={topArtists.updatedAt} />{topArtists.data!.items.slice(0, 5).map((a, i) => <ArtistRow key={a.id} artist={a} rank={i + 1} onOpen={() => navigate({ kind: "artist", id: a.id })} />)}</div></div></>}</State></div>;
 }
 function Playlists({ clientId, connected, navigate }: { clientId: string; connected: boolean; navigate: (r: Route) => void }) {
   const [page, setPage] = useState<Page<Playlist>>(); const [query, setQuery] = useState(""); const [error, setError] = useState(""); const [loading, setLoading] = useState(connected); const [loadingMore, setLoadingMore] = useState(false);
@@ -137,11 +155,17 @@ function ResultGroup({ title, className, children }: { title: string; className:
 function Library({ clientId, connected, navigate, savedIds, setSavedIds, toggleSaved }: { clientId: string; connected: boolean; navigate: (r: Route) => void; savedIds: Set<string>; setSavedIds: React.Dispatch<React.SetStateAction<Set<string>>>; toggleSaved: (id: string, saved: boolean) => Promise<void> }) { const [page, setPage] = useState<Page<{ added_at: string; track: Track }>>(); const [error, setError] = useState(""); useEffect(() => { if (!connected) return; void window.vibetify.spotify.library(clientId).then(x => { const result = x as Page<{ added_at: string; track: Track }>; setPage(result); setSavedIds(current => { const next = new Set(current); result.items.forEach(item => next.add(item.track.id)); return next; }); }).catch(e => setError(e instanceof Error ? e.message : "Could not load library.")); }, [clientId, connected]); return <div className="content-stack"><Header eyebrow="YOUR MUSIC" title="Liked songs" subtitle="Saved tracks from your Spotify library." /><State loading={!page && !error} error={error} connected={connected}>{page && <div className="panel"><SectionTitle title={`${page.total} liked songs`} action="" /><TrackList tracks={page.items.map(x => x.track)} navigate={navigate} savedIds={savedIds} setSavedIds={setSavedIds} toggleSaved={toggleSaved} /></div>}</State></div>; }
 function Stats({ clientId, connected, navigate, savedIds, setSavedIds, toggleSaved }: { clientId: string; connected: boolean; navigate: (r: Route) => void; savedIds: Set<string>; setSavedIds: React.Dispatch<React.SetStateAction<Set<string>>>; toggleSaved: (id: string, saved: boolean) => Promise<void> }) {
   const [range, setRange] = useState("short_term");
-  const [data, setData] = useState<{ artists?: Page<Artist>; tracks?: Page<Track>; recentTracks?: Page<{ played_at: string; track: Track }> }>();
-  const [error, setError] = useState("");
-  useEffect(() => { setData(undefined); setError(""); if (connected) void window.vibetify.spotify.topItems(clientId, range).then(x => setData(x as typeof data)).catch(e => setError(e instanceof Error ? e.message : "Could not load listening stats.")); }, [clientId, connected, range]);
-  const listening = useMemo(() => estimateArtistListeningMinutes(data?.recentTracks?.items ?? []), [data]);
-  return <div className="content-stack"><Header eyebrow="YOUR LISTENING" title="Listening stats" subtitle="Rankings from Spotify. Listening time is estimated from the available recent-play history." action={<select className="range-select" value={range} onChange={e => setRange(e.target.value)}><option value="short_term">Last 4 weeks</option><option value="medium_term">Last 6 months</option><option value="long_term">Last year</option></select>} /><State loading={!data && !error} error={error} connected={connected}>{data && <div className="two-column"><div className="panel"><SectionTitle title="Top artists" action="" />{data.artists?.items?.map((a, i) => <div className="artist-stat-row" key={a.id}><ArtistRow artist={a} rank={i + 1} listeningTime={formatListeningMinutes(listening.get(a.id))} onOpen={() => navigate({ kind: "artist", id: a.id })} /></div>) ?? <div className="empty-state">No artist history is available.</div>}</div><div className="panel"><SectionTitle title="Top tracks" action="" /><TrackList tracks={data.tracks?.items ?? []} navigate={navigate} savedIds={savedIds} setSavedIds={setSavedIds} toggleSaved={toggleSaved} /></div></div>}</State></div>;
+  const artists = useSpotifyResource(`top-artists:${range}`, fetchTopArtists(range), connected, { staleAfterMs: 5 * 60_000 });
+  const tracks = useSpotifyResource(`top-tracks:${range}`, fetchTopTracks(range), connected, { staleAfterMs: 5 * 60_000 });
+  const recent = useSpotifyResource("recent", fetchRecentlyPlayed, connected, { staleAfterMs: 5 * 60_000 });
+  const resources = [artists, tracks, recent];
+  const ready = artists.data && tracks.data && recent.data;
+  const firstError = resources.find(resource => resource.error)?.error;
+  const loading = !ready && !firstError;
+  const refreshing = resources.some(resource => resource.phase === "refreshing");
+  const refreshAll = () => resources.forEach(resource => resource.refresh());
+  const listening = useMemo(() => estimateArtistListeningMinutes(recent.data?.items ?? []), [recent.data]);
+  return <div className="content-stack"><Header eyebrow="YOUR LISTENING" title="Listening stats" subtitle="Rankings from Spotify. Listening time is estimated from the available recent-play history." action={<div className="header-actions"><select className="range-select" value={range} onChange={e => setRange(e.target.value)}><option value="short_term">Last 4 weeks</option><option value="medium_term">Last 6 months</option><option value="long_term">Last year</option></select><RefreshButton onClick={refreshAll} refreshing={loading || refreshing} label="Refresh listening stats" /></div>} /><State loading={loading} error={ready ? undefined : firstError} connected={connected}>{ready && <>{firstError && <div className="refresh-error">{firstError}</div>}<div className="two-column"><div className="panel"><SectionTitle title="Top artists" onRefresh={artists.refresh} refreshing={artists.phase === "refreshing"} updatedAt={artists.updatedAt} />{artists.data!.items.map((a, i) => <div className="artist-stat-row" key={a.id}><ArtistRow artist={a} rank={i + 1} listeningTime={formatListeningMinutes(listening.get(a.id))} onOpen={() => navigate({ kind: "artist", id: a.id })} /></div>)}</div><div className="panel"><SectionTitle title="Top tracks" onRefresh={tracks.refresh} refreshing={tracks.phase === "refreshing"} updatedAt={tracks.updatedAt} /><TrackList tracks={tracks.data!.items} navigate={navigate} savedIds={savedIds} setSavedIds={setSavedIds} toggleSaved={toggleSaved} /></div></div></>}</State></div>;
 }
 class ErrorBoundary extends Component<{ children: React.ReactNode }, { hasError: boolean }> {
   state = { hasError: false };
@@ -166,8 +190,66 @@ function TrackList({ tracks, navigate, savedIds, setSavedIds, toggleSaved }: { t
 function Settings({ connected, profile, connecting, error, configured, onConnect, onDisconnect, mockConfig, diagnostics, onMockChange, onMockConfigChange, onRefreshDiagnostics, onResetDiagnostics }: { connected: boolean; profile?: Profile; connecting: boolean; error: string; configured: boolean; onConnect: () => void; onDisconnect: () => void; mockConfig?: MockConfig; diagnostics?: Diagnostics; onMockChange: (enabled: boolean) => Promise<void>; onMockConfigChange: (config: { status?: string; delayMs?: number }) => Promise<void>; onRefreshDiagnostics: () => void; onResetDiagnostics: () => void }) {
   return <div className="content-stack settings-page"><Header eyebrow="PREFERENCES" title="Settings" subtitle="Your Spotify connection and development tools." /><div className="settings-card"><div className="settings-icon green">{profile?.imageUrl ? <img className="settings-avatar" src={profile.imageUrl} alt="" /> : <LockKeyhole size={18} />}</div><div><h3>{connected ? profile?.displayName : "Spotify connection"}</h3><p>{connected ? `Connected account · ${profile?.id}` : configured ? "Ready to connect your Spotify account." : "Add VITE_SPOTIFY_CLIENT_ID to enable OAuth."}</p>{error && <p className="settings-error">{error}</p>}</div>{connected ? <button className="outline-button danger" onClick={onDisconnect}>Disconnect</button> : <button className="outline-button" disabled={!configured || connecting} onClick={onConnect}>{connecting ? "Waiting for Spotify..." : "Connect Spotify"}</button>}</div>{mockConfig && <><div className="settings-card"><div><h3>Offline Spotify Mock Mode</h3><p>{mockConfig.enabled ? "Mock data is active. No Spotify API requests are sent." : "Real Spotify API mode is active."}</p>{mockConfig.enabled && <div><label>Response <select value={mockConfig.status} onChange={event => void onMockConfigChange({ status: event.target.value })}><option value="200">200 OK</option><option value="401">401 Unauthorized</option><option value="403">403 Forbidden</option><option value="429">429 Rate limited</option><option value="QUOTA_EXCEEDED">QUOTA_EXCEEDED</option><option value="500">500 Server error</option><option value="network">Network error</option></select></label><label> Delay <input type="number" min="0" max="5000" value={mockConfig.delayMs} onChange={event => void onMockConfigChange({ delayMs: Number(event.target.value) })} /> ms</label></div>}</div><button className="outline-button" onClick={() => void onMockChange(!mockConfig.enabled)}>{mockConfig.enabled ? "Use real API" : "Use mock data"}</button></div><div className="settings-card"><div><h3>Request diagnostics</h3>{diagnostics ? <p>{diagnostics.sessionRequests} requests · {diagnostics.cacheHits} cache hits · {diagnostics.cacheMisses} misses · {diagnostics.duplicateRequestsPrevented} deduplicated · concurrency {diagnostics.currentConcurrentRequests}/{diagnostics.maximumObservedConcurrency} · {diagnostics.queuedRequests} queued · {diagnostics.failedRequests} failed · {diagnostics.cooldownRejected} cooldown-waited</p> : <p>Inspect simulated navigation traffic from the main process.</p>}{diagnostics && <small>{Object.entries(diagnostics.requestsByEndpoint).map(([endpoint, count]) => `${endpoint}: ${count}`).join(" · ")}</small>}</div><button className="outline-button" onClick={onRefreshDiagnostics}>Refresh</button><button className="outline-button" onClick={onResetDiagnostics}>Reset</button></div></>}</div>;
 }
-function Assistant({ connected }: { connected: boolean }) { const [prompt, setPrompt] = useState(""); const [messages, setMessages] = useState<ChatMessage[]>([{ id: "welcome", role: "assistant", text: "Good evening. I’m ready to shape your next listening session." }]); const send = (value: string) => { const text = value.trim(); if (!text) return; setMessages(m => [...m, { id: crypto.randomUUID(), role: "user", text }, { id: crypto.randomUUID(), role: "assistant", text: connected ? "Spotify is connected. AI tool execution is planned for the next milestone." : "Connect Spotify in Settings to use your library." }]); setPrompt(""); }; return <div className="assistant-page"><Header eyebrow="AI ASSISTANT" title="Make something memorable." subtitle="The assistant stays in preview until tool execution is implemented." /><div className="chat-log">{messages.map(m => <div className={`message ${m.role}`} key={m.id}><div className="message-icon"><Bot size={17} /></div><p>{m.text}</p></div>)}</div><div className="chat-input"><input value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={e => e.key === "Enter" && send(prompt)} placeholder="Ask anything about your music..." /><button disabled={!prompt.trim()} onClick={() => send(prompt)}>↑</button></div></div>; }
-function SectionTitle({ title, action, onClick }: { title: string; action: string; onClick?: () => void }) { return <div className="section-title"><h2>{title}</h2>{action && <button onClick={onClick}>{action}</button>}</div>; }
+function Assistant({ connected }: { connected: boolean }) {
+  const [conversations, setConversations] = useState<AIConversationSummary[]>([]);
+  const [conversation, setConversation] = useState<AIConversation>();
+  const [prompt, setPrompt] = useState("");
+  const [activity, setActivity] = useState<string[]>([]);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [lastPrompt, setLastPrompt] = useState("");
+  const [status, setStatus] = useState<{ label: string; model?: string; available?: boolean; modelInstalled?: boolean }>();
+  const chatLogRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    void Promise.all([window.vibetify.ai.status(), window.vibetify.ai.listConversations()]).then(async ([nextStatus, list]) => {
+      setStatus(nextStatus);
+      setConversations(list);
+      const current = list[0] ? await window.vibetify.ai.getConversation(list[0].id) : await window.vibetify.ai.newConversation();
+      if (current) setConversation(current);
+    }).catch(e => setError(e instanceof Error ? e.message : "Could not load the assistant."));
+  }, []);
+  const startConversation = async () => {
+    try { setError(""); const next = await window.vibetify.ai.newConversation(); setConversation(next); setConversations(await window.vibetify.ai.listConversations()); } catch (e) { setError(e instanceof Error ? e.message : "Could not start a conversation."); }
+  };
+  const deleteConversation = async (id: string) => {
+    try {
+      await window.vibetify.ai.deleteConversation(id);
+      const list = await window.vibetify.ai.listConversations();
+      setConversations(list);
+      const next = list[0] ? await window.vibetify.ai.getConversation(list[0].id) : await window.vibetify.ai.newConversation();
+      if (next) setConversation(next);
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not delete the conversation."); }
+  };
+  const selectConversation = async (id: string) => {
+    try { const selected = await window.vibetify.ai.getConversation(id); if (selected) setConversation(selected); } catch (e) { setError(e instanceof Error ? e.message : "Could not load the conversation."); }
+  };
+  const send = async (value = prompt) => {
+    const text = value.trim();
+    if (!text || !conversation || loading) return;
+    setPrompt(""); setError(""); setLoading(true); setActivity([]);
+    setLastPrompt(text);
+    setConversation(current => current ? { ...current, updatedAt: new Date().toISOString(), messages: [...current.messages, createOptimisticMessage(text)] } : current);
+    try {
+      const result = await window.vibetify.ai.send(clientId, conversation.id, text);
+      setConversation(result.conversation);
+      setActivity(result.toolActivity);
+      setConversations(await window.vibetify.ai.listConversations());
+    } catch (e) { setError(e instanceof Error ? e.message : "The assistant could not complete that request."); } finally { setLoading(false); }
+  };
+  useEffect(() => {
+    const log = chatLogRef.current;
+    if (log) log.scrollTop = log.scrollHeight;
+  }, [conversation?.messages.length, loading, activity.length]);
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } };
+  return <div className="assistant-page"><Header eyebrow="AI ASSISTANT" title="Make something memorable." subtitle="Ask about your Spotify profile, playlists, or listening statistics." action={<button className="secondary-button" onClick={() => void startConversation()}>New conversation</button>} /><div className="assistant-layout"><aside className="conversation-list"><div className="assistant-status"><span className={`status-dot ${status?.available === false ? "disconnected" : "connected"}`} />{status?.label ?? "Mock AI"}{status?.model ? ` · ${status.model}` : ""}</div>{status?.available === false && <div className="assistant-note">The configured AI backend is unavailable. Start it and retry.</div>}{status?.modelInstalled === false && <div className="assistant-note">The configured Ollama model is not installed.</div>}{conversations.map(item => <div className="conversation-row" key={item.id}><button className={`conversation-item ${item.id === conversation?.id ? "active" : ""}`} onClick={() => void selectConversation(item.id)}>{item.title}</button><button className="conversation-delete" onClick={() => void deleteConversation(item.id)} aria-label={`Delete ${item.title}`}>×</button></div>)}</aside><section className="assistant-panel"><div className="chat-log" ref={chatLogRef}>{conversation?.messages.length ? conversation.messages.map(message => <div className={`message ${message.role}`} key={message.id}><div className="message-icon">{message.role === "assistant" ? <Bot size={17} /> : <CircleUserRound size={17} />}</div>{message.role === "assistant" ? <MarkdownMessage content={message.content} /> : <p>{message.content}</p>}</div>) : <div className="assistant-empty"><Bot size={28} /><p>Try “Show me my Spotify playlists.”</p></div>}{activity.map(item => <div className="tool-activity" key={item}>{item}</div>)}{loading && <div className="tool-activity thinking-indicator"><span />Thinking...</div>}</div>{error && <div className="error-state">{error} {lastPrompt && <button className="link-button retry-button" onClick={() => void send(lastPrompt)}>Retry</button>}</div>}{!connected && <div className="assistant-note">Connect Spotify to use Spotify tools. Mock Spotify mode can be used for development.</div>}<div className="chat-input"><input value={prompt} onChange={event => setPrompt(event.target.value)} onKeyDown={handleKeyDown} placeholder="Ask anything about your music..." disabled={loading} /><button disabled={(!prompt.trim() && !lastPrompt) || loading} onClick={() => void send(lastPrompt || prompt)} aria-label="Send message">↑</button></div></section></div></div>;
+}
+function MarkdownMessage({ content }: { content: string }) {
+  return <div className="message-content"><ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} components={{ a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" /> }}>{normalizeEscapedMarkdown(content)}</ReactMarkdown></div>;
+}
+function SectionTitle({ title, action, onClick, onRefresh, refreshing, updatedAt }: { title: string; action?: string; onClick?: () => void; onRefresh?: () => void; refreshing?: boolean; updatedAt?: number }) { return <div className="section-title"><h2>{title}</h2><div className="section-title-actions">{updatedAt !== undefined && <UpdatedText updatedAt={updatedAt} />}{onRefresh && <RefreshButton onClick={onRefresh} refreshing={Boolean(refreshing)} label={`Refresh ${title}`} />}{action && <button onClick={onClick}>{action}</button>}</div></div>; }
+function RefreshButton({ onClick, refreshing, label }: { onClick: () => void; refreshing: boolean; label: string }) { return <button className="icon-button refresh-button" onClick={onClick} disabled={refreshing} aria-label={label} title={label}><RefreshCw size={15} className={refreshing ? "spin" : ""} /></button>; }
+function UpdatedText({ updatedAt }: { updatedAt?: number }) { return updatedAt ? <span className="updated-text">{formatUpdated(updatedAt)}</span> : null; }
+function formatUpdated(updatedAt: number): string { const elapsed = Date.now() - updatedAt; if (elapsed < 60_000) return "Updated just now"; if (elapsed < 3_600_000) return `Updated ${Math.max(1, Math.floor(elapsed / 60_000))} minutes ago`; return `Updated at ${new Date(updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`; }
 function Stat({ value, label, icon }: { value: string; label: string; icon: React.ReactNode }) { return <div className="stat panel"><span>{icon}</span><div><strong>{value}</strong><small>{label}</small></div></div>; }
 function PlaylistCard({ playlist, onOpen }: { playlist: Playlist; onOpen: () => void }) { return <button className="playlist-card" onClick={onOpen}><div className="playlist-art" style={{ backgroundImage: playlist.images?.[0]?.url ? `url(${playlist.images[0].url})` : undefined }}><b>{playlist.images?.[0]?.url ? "" : "♪"}</b><span><Play size={14} fill="currentColor" /></span></div><h3>{playlist.name}</h3><p>{playlist.tracks?.total ?? 0} tracks · {playlist.owner?.display_name ?? "Spotify"}</p></button>; }
 function formatDuration(ms: number): string { return `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`; }
