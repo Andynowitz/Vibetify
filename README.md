@@ -2,6 +2,29 @@
 
 Vibetify is a Windows desktop music workspace built with Electron, React, TypeScript, and Vite. It combines a Spotify-backed music-library interface with an AI assistant and secure token handling.
 
+## Screenshots
+
+### Dashboard
+![Vibetify Dashboard](screenshots/dashboard.png)
+
+### AI Assistant
+![Vibetify AI Assistant](screenshots/ai-assistant.png)
+
+### My Playlists
+![Vibetify My Playlists](screenshots/my-playlists.png)
+
+### Your Library
+![Vibetify Your Library](screenshots/your-library.png)
+
+### Listening Stats
+![Vibetify Listening Stats](screenshots/listening-stats.png)
+
+### Settings
+![Vibetify Settings](screenshots/settings.png)
+
+*Discover is currently under development and will be showcased in a future update.*
+
+
 ## Quick Start (Git Bash)
 
 Open three Git Bash terminals from your project directory.
