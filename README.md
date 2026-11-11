@@ -68,11 +68,11 @@ npm run backend:dev
 cd ~/Desktop/Vibetify
 source ~/.config/vibetify/electron.env
 npm run dev
-```chat
+```
 
 **4. Start Backend and Electron and Vite**
-```bash
 
+```bash
 cd ~/Desktop/Vibetify
 source ~/.config/vibetify/backend.env
 source ~/.config/vibetify/electron.env
