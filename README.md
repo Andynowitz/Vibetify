@@ -13,6 +13,11 @@ Vibetify is a Windows desktop music workspace built with Electron, React, TypeSc
 ### My Playlists
 ![Vibetify My Playlists](screenshots/my-playlists.png)
 
+### Discover
+![Vibetify Discover](screenshots/discover1.png)
+![Vibetify Your Library](screenshots/discover2.png)
+
+
 ### Your Library
 ![Vibetify Your Library](screenshots/your-library.png)
 
@@ -34,7 +39,19 @@ Open three Git Bash terminals from your project directory.
 ```bash
 ollama serve
 ```
+or 
 
+```bash
+ollama run qwen3-coder:30b
+```
+
+Leave ollama with:
+
+```bash
+/bye
+```
+
+or 
 If Ollama is already running in the background, skip this step.
 
 **2. Start the AI backend**
@@ -51,7 +68,7 @@ npm run backend:dev
 cd ~/Desktop/Vibetify
 source ~/.config/vibetify/electron.env
 npm run dev
-```
+```chat
 
 **4. Start Backend and Electron and Vite**
 ```bash
@@ -195,10 +212,21 @@ Track hearts use the current generic library endpoints with Spotify URIs:
 
 The `user-library-read` and `user-library-modify` scopes are requested during OAuth. Library checks are batched in groups of 40 URIs, and the result is mapped back to the original track order, including duplicates. Existing sessions authorized before these scopes were added must be disconnected and reauthorized. Saved state is checked against Spotify and shared across the dashboard, playlists, Discover, and library views.
 
-My Playlists and playlist details filter their already-loaded data locally. Discover uses one debounced `/v1/search` request with `track,artist,album,playlist` and presents grouped, type-labelled results. Listening Stats uses defensive handling for incomplete or unavailable recently-played history; displayed artist listening time is an estimate, not lifetime listening data.
+My Playlists and playlist details filter their already-loaded data locally. Discover uses one debounced `/v1/search` request with `track,artist,album,playlist` (Enter submits immediately) and presents grouped, type-labelled results. Search payloads are normalized before rendering: `null` slots, entries without an `id`/`name`, duplicate ids, and missing sections are dropped, so a partial Spotify response degrades to fewer results instead of an uncaught render error. Page content is wrapped in an error boundary that keeps the window usable and offers a retry. Listening Stats uses defensive handling for incomplete or unavailable recently-played history; displayed artist listening time is an estimate, not lifetime listening data.
 
 The sidebar is fixed to the full Electron viewport while the main page scrolls independently. The default window is 1600×1000 with a 1200×800 minimum.
 
 ## Security
 
 Electron runs with `contextIsolation`, `sandbox`, and `nodeIntegration: false`. The preload exposes no arbitrary filesystem, process, or IPC access. External links are validated in the main process before opening.
+
+## Architecture
+
+Desktop Framework: ELECTRON
+Frontend: React
+Backend: Node.js
+
+Windows desktop Application that connects to a user's Spotify account through the Spotify Web API using OATH 2.0 Authentication
+It retrieves real Spotify Data, such as playlists, songs, listening statistics etc.
+Frontend built with React and Typescript, while Electron handles desktop functionality and communication with the backend
+An integrated AI assistant uses local LLMs through Ollama or the OpenAI API to understand natural-language requests, retrieve Spotify information and perform actions such as creating or modifying playlists.
